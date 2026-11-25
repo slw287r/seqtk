@@ -45,15 +45,16 @@ typedef struct {
 	int8_t *rev;
 } reglist_t;
 
-#include "khash.h"
-KHASH_MAP_INIT_STR(reg, reglist_t)
-KHASH_SET_INIT_INT64(64)
+#include "khashl.h"
+KHASHL_CMAP_INIT(KH_LOCAL, reg_t, reg, kh_cstr_t, reglist_t, kh_hash_str, kh_eq_str)
+KHASHL_CMAP_INIT(KH_LOCAL, s2_t, s2, kh_cstr_t, kh_cstr_t, kh_hash_str, kh_eq_str)
+KHASHL_SET_INIT(KH_LOCAL, u64_t, u64, uint64_t, kh_hash_uint64, kh_eq_generic)
 
-typedef kh_reg_t reghash_t;
+//typedef kh_reg_t reg_t;
 
-reghash_t *stk_reg_read_alt(const char *fn)
+reg_t *stk_reg_read_alt(const char *fn)
 {
-	reghash_t *h = kh_init(reg);
+	reg_t *h = reg_init();
 	gzFile fp;
 	kstream_t *ks;
 	int dret;
@@ -87,11 +88,11 @@ reghash_t *stk_reg_read_alt(const char *fn)
 			}
 		}
 		if (i == 0) continue;
-		k = kh_get(reg, h, str.s);
+		k = reg_get(h, str.s);
 		if (k == kh_end(h)) {
 			int ret;
 			char *s = strdup(str.s);
-			k = kh_put(reg, h, s, &ret);
+			k = reg_put(h, s, &ret);
 			memset(&kh_val(h, k), 0, sizeof(reglist_t));
 		}
 		r = &kh_val(h, k);
@@ -112,9 +113,9 @@ reghash_t *stk_reg_read_alt(const char *fn)
 	return h;
 }
 
-reghash_t *stk_reg_read(const char *fn)
+reg_t *stk_reg_read(const char *fn)
 {
-	reghash_t *h = kh_init(reg);
+	reg_t *h = reg_init();
 	gzFile fp;
 	kstream_t *ks;
 	int dret;
@@ -127,11 +128,11 @@ reghash_t *stk_reg_read(const char *fn)
 	while (ks_getuntil(ks, 0, str, &dret) >= 0) {
 		int64_t beg = -1, end = -1;
 		reglist_t *p;
-		khint_t k = kh_get(reg, h, str->s);
+		khint_t k = reg_get(h, str->s);
 		if (k == kh_end(h)) {
 			int ret;
 			char *s = strdup(str->s);
-			k = kh_put(reg, h, s, &ret);
+			k = reg_put(h, s, &ret);
 			memset(&kh_val(h, k), 0, sizeof(reglist_t));
 		}
 		p = &kh_val(h, k);
@@ -164,18 +165,16 @@ reghash_t *stk_reg_read(const char *fn)
 	return h;
 }
 
-void stk_reg_destroy(reghash_t *h)
+void stk_reg_destroy(reg_t *h)
 {
 	khint_t k;
 	if (h == 0) return;
-	for (k = 0; k < kh_end(h); ++k) {
-		if (kh_exist(h, k)) {
-			free(kh_val(h, k).a);
-			free(kh_val(h, k).rev);
-			free((char*)kh_key(h, k));
-		}
+	kh_foreach (h, k) {
+		free(kh_val(h, k).a);
+		free(kh_val(h, k).rev);
+		free((char*)kh_key(h, k));
 	}
-	kh_destroy(reg, h);
+	reg_destroy(h);
 }
 
 /* constant table */
@@ -236,7 +235,7 @@ char comp_tab[] = {
 
 static void stk_printstr(FILE *fp, const kstring_t *s, unsigned line_len)
 {
-	if (line_len != UINT_MAX && line_len != 0) {
+	if (line_len != UINT_MAX && line_len != 0 && line_len < s->l) {
 		int64_t i, rest = s->l;
 		for (i = 0; i < s->l; i += line_len, rest -= line_len) {
 			fputc('\n', fp);
@@ -266,6 +265,67 @@ static inline void stk_printseq_renamed(FILE *fp, const kseq_t *s, int line_len,
 		fputc('+', fp);
 		stk_printstr(fp, &s->qual, line_len);
 	}
+}
+
+static inline void stk_printseq_renamed2(FILE *fp, const kseq_t *s, int line_len,
+		const char *name)
+{
+	fputc(s->qual.l? '@' : '>', fp);
+	fputs(name ? name : s->name.s, fp);
+	if (s->comment.l) {
+		fputc(' ', fp); fputs(s->comment.s, fp);
+	}
+	stk_printstr(fp, &s->seq, line_len);
+	if (s->qual.l) {
+		fputc('+', fp);
+		stk_printstr(fp, &s->qual, line_len);
+	}
+}
+
+void s2_ins(s2_t *h, kh_cstr_t a, kh_cstr_t b)
+{
+	khint_t k;
+	int absent;
+	if (s2_get(h, a) == kh_end(h))
+	{
+		k = s2_put(h, strdup(a), &absent);
+		kh_val(h, k) = strdup(b);
+	}
+}
+
+kh_cstr_t s2_xval(const s2_t *h, kh_cstr_t a)
+{
+	khint_t k;
+	return (k = s2_get(h, a)) != kh_end(h) ? kh_val(h, k) : NULL;
+}
+
+void s2_des(s2_t *h)
+{
+	khint_t k;
+	kh_foreach(h, k)
+	{
+		free((char *)kh_key(h, k));
+		free((char *)kh_val(h, k));
+	}
+	s2_destroy(h);
+}
+
+static void load_map(const char *fn, s2_t *map)
+{
+	FILE *fp;
+	char line[LINE_MAX], from[NAME_MAX], to[NAME_MAX];
+	if (!(fp = fopen(fn, "r")))
+	{
+		fprintf(stderr, "Failed to read file [%s]\n", fn);
+		return;
+	}
+	while (fgets(line, LINE_MAX, fp))
+	{
+		line[strcspn(line, "\n")] = '\0';
+		if (sscanf(line, "%[^\t]\t%[^\n]", from, to) == 2)
+			s2_ins(map, from, to);
+	}
+	fclose(fp);
 }
 
 static inline void stk_printseq_suffix(FILE *fp, const kseq_t *s, int line_len, const char *suffix)
@@ -447,7 +507,7 @@ int stk_comp(int argc, char *argv[])
 	kseq_t *seq;
 	int64_t l;
 	int c, upper_only = 0;
-	reghash_t *h = 0;
+	reg_t *h = 0;
 	reglist_t dummy;
 
 	while ((c = getopt(argc, argv, "ur:")) >= 0) {
@@ -473,7 +533,7 @@ int stk_comp(int argc, char *argv[])
 		int k;
 		reglist_t *p = 0;
 		if (h) {
-			khint_t k = kh_get(reg, h, seq->name.s);
+			khint_t k = reg_get(h, seq->name.s);
 			if (k != kh_end(h)) p = &kh_val(h, k);
 		} else {
 			p = &dummy;
@@ -668,7 +728,7 @@ int stk_gap(int argc, char *argv[])
 
 int stk_subseq(int argc, char *argv[])
 {
-	khash_t(reg) *h = kh_init(reg);
+	reg_t *h = reg_init();
 	gzFile fp;
 	kseq_t *seq;
 	int64_t l, i, j, seq_max = 0;
@@ -706,7 +766,7 @@ int stk_subseq(int argc, char *argv[])
 	seq = kseq_init(fp);
 	while ((l = kseq_read(seq)) >= 0) {
 		reglist_t *p;
-		k = kh_get(reg, h, seq->name.s);
+		k = reg_get(h, seq->name.s);
 		if (k == kh_end(h)) continue;
 		p = &kh_val(h, k);
 		for (i = 0; i < p->n; ++i) {
@@ -912,7 +972,7 @@ int stk_famask(int argc, char *argv[])
 
 int stk_mutfa(int argc, char *argv[])
 {
-	khash_t(reg) *h = kh_init(reg);
+	reg_t *h = reg_init();
 	gzFile fp;
 	kseq_t *seq;
 	kstream_t *ks;
@@ -939,9 +999,9 @@ int stk_mutfa(int argc, char *argv[])
 		int64_t beg = 0;
 		int ret;
 		reglist_t *p;
-		k = kh_get(reg, h, s);
+		k = reg_get(h, s);
 		if (k == kh_end(h)) {
-			k = kh_put(reg, h, s, &ret);
+			k = reg_put(h, s, &ret);
 			memset(&kh_val(h, k), 0, sizeof(reglist_t));
 		}
 		p = &kh_val(h, k);
@@ -972,7 +1032,7 @@ int stk_mutfa(int argc, char *argv[])
 	seq = kseq_init(fp);
 	while ((l = kseq_read(seq)) >= 0) {
 		reglist_t *p;
-		k = kh_get(reg, h, seq->name.s);
+		k = reg_get(h, seq->name.s);
 		if (k != kh_end(h)) {
 			p = &kh_val(h, k);
 			for (i = 0; i < p->n; ++i) {
@@ -991,13 +1051,11 @@ int stk_mutfa(int argc, char *argv[])
 	// free
 	kseq_destroy(seq);
 	gzclose(fp);
-	for (k = 0; k < kh_end(h); ++k) {
-		if (kh_exist(h, k)) {
-			free(kh_val(h, k).a);
-			free((char*)kh_key(h, k));
-		}
+	kh_foreach (h, k) {
+		free(kh_val(h, k).a);
+		free((char*)kh_key(h, k));
 	}
-	kh_destroy(reg, h);
+	reg_destroy(h);
 	return 0;
 }
 
@@ -1285,7 +1343,7 @@ int stk_sample(int argc, char *argv[])
 		if (buf != NULL) free(buf);
 	} else {
 		uint64_t *buf;
-		khash_t(64) *hash;
+		u64_t *hash;
 		int absent;
 
 		if (strcmp(argv[optind], "-") == 0) {
@@ -1313,17 +1371,17 @@ int stk_sample(int argc, char *argv[])
 		}
 		kseq_destroy(seq);
 		gzclose(fp);
-		hash = kh_init(64);
-		for (i = 0; i < num; ++i) kh_put(64, hash, buf[i], &absent);
+		hash = u64_init();
+		for (i = 0; i < num; ++i) u64_put(hash, buf[i], &absent);
 		free(buf);
 		// 2nd pass
 		fp = gzopen(argv[optind], "r");
 		seq = kseq_init(fp);
 		n_seqs = 0;
 		while (kseq_read(seq) >= 0)
-			if (kh_get(64, hash, ++n_seqs) != kh_end(hash))
+			if (u64_get(hash, ++n_seqs) != kh_end(hash))
 				stk_printseq(stdout, seq, UINT_MAX);
-		kh_destroy(64, hash);
+		u64_destroy(hash);
 	}
 
 	kseq_destroy(seq);
@@ -1334,11 +1392,11 @@ int stk_sample(int argc, char *argv[])
 
 /* seq */
 
-void stk_mask(kseq_t *seq, const khash_t(reg) *h, int is_complement, int mask_chr)
+void stk_mask(kseq_t *seq, const reg_t *h, int is_complement, int mask_chr)
 {
 	int64_t i, j;
-	khiter_t k;
-	k = kh_get(reg, h, seq->name.s);
+	khint_t k;
+	k = reg_get(h, seq->name.s);
 	if (k == kh_end(h)) { // not found in the hash table
 		if (is_complement) {
 			if (mask_chr) {
@@ -1386,7 +1444,7 @@ int stk_seq(int argc, char *argv[])
 	unsigned line_len = 0;
 	int64_t i, n_seqs = 0;
 	double frac = 1.;
-	khash_t(reg) *h = 0;
+	reg_t *h = 0;
 	krand_t *kr = 0;
 
 	while ((c = getopt(argc, argv, "N12q:l:Q:aACrn:s:f:M:L:cVUX:SF:xR")) >= 0) {
@@ -1731,10 +1789,10 @@ int stk_rename(int argc, char *argv[])
 	gzFile fp;
 	kseq_t *seq, last;
 	char *prefix = 0;
-	uint64_t n = 1;
+	uint64_t n = 1, wrap_col = 0;
 
 	if (argc == 1 && isatty(fileno(stdin))) {
-		fprintf(stderr, "Usage: seqtk rename <in.fq> [prefix]\n");
+		fprintf(stderr, "Usage: seqtk rename <in.fq> [prefix|cast.txt] \e[90m[wrap_col]\e[0m\n");
 		return 1;
 	}
 	fp = argc > 1 && strcmp(argv[1], "-")? gzopen(argv[1], "r") : gzdopen(fileno(stdin), "r");
@@ -1744,33 +1802,47 @@ int stk_rename(int argc, char *argv[])
 	}
 	seq = kseq_init(fp);
 	if (argc > 2) prefix = argv[2];
-
-	memset(&last, 0, sizeof(kseq_t));
-	while (kseq_read(seq) >= 0) {
-		if (last.name.l) {
-			kstring_t *p = &last.name, *q = &seq->name;
-			int is_diff;
-			if (p->l == q->l) {
-				int l = (p->l > 2 && p->s[p->l-2] == '/' && q->s[q->l-2] == '/' && isdigit(p->s[p->l-1]) && isdigit(q->s[q->l-1]))? p->l - 2 : p->l;
-				is_diff = strncmp(p->s, q->s, l);
-			} else is_diff = 1;
-			if (!is_diff) {
-				stk_printseq_renamed(stdout, &last, 0, prefix, n);
-				stk_printseq_renamed(stdout, seq,   0, prefix, n);
-				last.name.l = 0;
-				++n;
-			} else {
-				stk_printseq_renamed(stdout, &last, 0, prefix, n);
-				++n;
-				cpy_kseq(&last, seq);
-			}
-		} else cpy_kseq(&last, seq);
+	if (argc > 3) wrap_col = atoi(argv[3]);
+	if (access(prefix, R_OK))
+	{
+		memset(&last, 0, sizeof(kseq_t));
+		while (kseq_read(seq) >= 0) {
+			if (last.name.l) {
+				kstring_t *p = &last.name, *q = &seq->name;
+				int is_diff;
+				if (p->l == q->l) {
+					int l = (p->l > 2 && p->s[p->l-2] == '/' && q->s[q->l-2] == '/' && isdigit(p->s[p->l-1]) && isdigit(q->s[q->l-1]))? p->l - 2 : p->l;
+					is_diff = strncmp(p->s, q->s, l);
+				} else is_diff = 1;
+				if (!is_diff) {
+					stk_printseq_renamed(stdout, &last, 0, prefix, n);
+					stk_printseq_renamed(stdout, seq,   0, prefix, n);
+					last.name.l = 0;
+					++n;
+				} else {
+					stk_printseq_renamed(stdout, &last, 0, prefix, n);
+					++n;
+					cpy_kseq(&last, seq);
+				}
+			} else cpy_kseq(&last, seq);
+		}
+		if (last.name.l) stk_printseq_renamed(stdout, &last, 0, prefix, n);
 	}
-	if (last.name.l) stk_printseq_renamed(stdout, &last, 0, prefix, n);
+	else
+	{
+		s2_t *map = s2_init();
+		load_map(argv[2], map);
+		if (!kh_size(map))
+		{
+			fprintf(stderr, "[E::%s] names map is empty, exit...\n", __func__);
+			return 1;
+		}
+		while (kseq_read(seq) >= 0)
+			stk_printseq_renamed2(stdout, seq, wrap_col, s2_xval(map, seq->name.s));
+	}
 
 	kseq_destroy(seq);
 	gzclose(fp);
-	// free last!
 	return 0;
 }
 
@@ -1973,7 +2045,7 @@ int stk_telo(int argc, char *argv[])
 	char *telo_seq = "CCCTAA";
 	int c, i, j, len, absent, show_profile = 0, penalty = 1, max_drop = 2000, min_score = 300;
 	uint64_t x, mask, sum_input = 0, sum_telo = 0;
-	khash_t(64) *h;
+	u64_t *h;
 
 	while ((c = getopt(argc, argv, "m:p:d:s:P")) >= 0) {
 		if (c == 'm') telo_seq = optarg;
@@ -1997,15 +2069,15 @@ int stk_telo(int argc, char *argv[])
 	len = strlen(telo_seq);
 	mask = (1ULL<<2*len) - 1;
 
-	h = kh_init(64); // hash table for all roations of the telomere motif
-	kh_resize(64, h, len * 2);
+	h = u64_init(); // hash table for all roations of the telomere motif
+	u64_resize(h, len * 2);
 	for (i = 0; i < len; ++i) {
 		for (j = 0, x = 0; j < len; ++j) {
 			int c = seq_nt6_table[(uint8_t)telo_seq[(i + j) % len]];
 			assert(c >= 1 && c <= 4);
 			x = x<<2 | (c-1);
 		}
-		kh_put(64, h, x, &absent);
+		u64_put(h, x, &absent);
 	}
 
 	fp = argc > 1 && strcmp(argv[optind], "-")? gzopen(argv[optind], "r") : gzdopen(fileno(stdin), "r");
@@ -2023,7 +2095,7 @@ int stk_telo(int argc, char *argv[])
 			int hit = 0, c = seq_nt6_table[(uint8_t)seq->seq.s[i]];
 			if (c >= 1 && c <= 4) { // not N
 				x = (x<<2 | (c-1)) & mask;
-				if (++l >= len && kh_get(64, h, x) != kh_end(h)) // x is at least 6bp long and is a telomere motif
+				if (++l >= len && u64_get(h, x) != kh_end(h)) // x is at least 6bp long and is a telomere motif
 					hit = 1;
 			} else l = 0, x = 0; // N, ambiguous base
 			if (show_profile) printf("P\t%s\t%d\t%d\t%d\n", seq->name.s, i, score, max);
@@ -2041,7 +2113,7 @@ int stk_telo(int argc, char *argv[])
 			int hit = 0, c = seq_nt6_table[(uint8_t)seq->seq.s[i]];
 			if (c >= 1 && c <= 4) {
 				x = (x<<2 | (4-c)) & mask;
-				if (++l >= len && kh_get(64, h, x) != kh_end(h))
+				if (++l >= len && u64_get(h, x) != kh_end(h))
 					hit = 1;
 			} else l = 0, x = 0;
 			if (show_profile) printf("Q\t%s\t%d\t%d\t%d\n", seq->name.s, seq->seq.l - i, score, max);
@@ -2054,7 +2126,7 @@ int stk_telo(int argc, char *argv[])
 			sum_telo += seq->seq.l - max_i;
 		}
 	}
-	kh_destroy(64, h);
+	u64_destroy(h);
 	kseq_destroy(seq);
 	gzclose(fp);
 	fprintf(stderr, "%ld\t%ld\n", (long)sum_telo, (long)sum_input);
